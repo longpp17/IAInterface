@@ -4,3 +4,7 @@ python-socketio~=5.11.1
 numpy~=1.26.4
 requests~=2.26.0
 rich~=13.7.1
+
+asyncio~=3.4.3
+aioconsole~=0.7.0
+sounddevice~=0.4.6
