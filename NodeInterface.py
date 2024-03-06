@@ -16,7 +16,6 @@ RATE = 44100
 CHUNK = 1024
 stream = None
 
-
 async def get_device_index(p: pyaudio.PyAudio):
     devices = p.get_device_count()
     input_devices, output_devices = {}, {}
