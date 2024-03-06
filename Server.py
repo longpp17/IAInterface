@@ -1,76 +1,93 @@
-# This is a sample Python script.
-
-# Press ⌃R to execute it or replace it with your code.
-# Press Double ⇧ to search everywhere for classes, files, tool windows, actions, and settings.
+import time
 
 import pyaudio
-import socket
-from srudp import SecureReliableSocket
-import threading
-# Create an instance of PyAudio
+import asyncio
+import socketio
+from aioconsole import ainput
+
+# Initialize PyAudio and socket.io async client
 p = pyaudio.PyAudio()
+sio = socketio.AsyncClient(logger=True, engineio_logger=True)
+
+# Constants for audio stream configuration
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
+RATE = 44100
+CHUNK = 1024
+stream = None
 
 
-def get_device_index(p: pyaudio.PyAudio):
-    # return: [index: device_name]
+async def get_device_index(p: pyaudio.PyAudio):
     devices = p.get_device_count()
-    device_index = {}
+    input_devices, output_devices = {}, {}
+
     for i in range(devices):
         device_info = p.get_device_info_by_index(i)
         if device_info.get('maxInputChannels') > 0:
-            device_index[i] = device_info.get('name')
-    return device_index
-
-def get_stream(p: pyaudio.PyAudio, device_index: int):
-    # Open a stream with the device index
-    stream = p.open(format=pyaudio.paInt16, channels=1, rate=44100, input=True, input_device_index=device_index)
-    return stream
+            input_devices[i] = device_info.get('name')
+        if device_info.get('maxOutputChannels') > 0:
+            output_devices[i] = device_info.get('name')
+    return input_devices, output_devices
 
 
-def broadcast(stream: pyaudio.Stream, clients: list):
-    # Broadcast the stream to all clients
+async def get_stream(p: pyaudio.PyAudio, input_device_index: int, output_device_index: int):
+    local_stream = p.open(format=FORMAT,
+                          channels=CHANNELS,
+                          rate=RATE,
+                          input=True,
+                          output=True,
+                          input_device_index=input_device_index,
+                          output_device_index=output_device_index,
+                          frames_per_buffer=CHUNK)
+    return local_stream
 
+
+async def broadcast(local_stream: pyaudio.Stream):
     while True:
-        data = stream.read(1024)
-        for client in clients:
-            client.sendall(data)
-
-def setup_server(port: int):
-    # Create a socket server
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind(('0.0.0.0', port))
-    server.listen(5)
-    return server
+        data = local_stream.read(CHUNK, exception_on_overflow=False)
+        await sio.emit('audio-buffer', data)
+        await asyncio.sleep(0)
 
 
-def handle_stream(stream: pyaudio.Stream, current_client: socket,clients_list: list):
+@sio.on('audio-buffer')
+async def on_audio(data):
+    print("Received audio data from the server")
+    if stream is not None:
+        stream.write(data)
+
+
+async def main():
+    input_devices, output_devices = await get_device_index(p)
+
+    print("Available input devices: ")
+    print(input_devices)
+    input_device_index = int(await ainput("Enter the index of the device you want to use: "))
+
+    print("Available output devices: ")
+    print(output_devices)
+    output_device_index = int(await ainput("Enter the index of the device you want to use: "))
+
+    await sio.connect('http://localhost:3000')
+    print('Connected to the server with SID:', sio.sid)
+    await sio.emit('hello', 'Hello from the client')
+    print("Entering Bootstrap Link, Input 'done' to complete")
+    links = []
     while True:
-        try:
-            broadcast(stream, clients_list)
-        except:
-            clients_list.remove(current_client)
-            current_client.close()
+        link = await ainput("Enter the bootstrap link: ")
+        if link == 'done':
             break
+        else:
+            links.append(link)
+    await sio.emit('setup-bootstrap', links)
+    print("setup-bootstrap event emitted with data:", links)
 
 
-def main():
-    device_index = get_device_index(p)
+    global stream
+    stream = await get_stream(p, input_device_index, output_device_index)
+    await broadcast(stream)
 
-    print("Available devices: ")
-    print(device_index)
-    device_index = int(input("Enter the index of the device you want to use: "))
-    stream = get_stream(p, device_index)
-    clients = []
 
-    port = int(input("Enter the port to run the server on: "))
-    server = setup_server(port)
-    print("Server running")
-    while True:
-        client, addr = server.accept()
-        clients.append(client)
-        print(f"Connected with {addr}")
-        stream = get_stream(p, device_index)
-        client_thread = threading.Thread(target=handle_stream, args=(stream, client, clients))
-        client_thread.start()
+if __name__ == '__main__':
+    asyncio.run(main())
 
-main()
+
