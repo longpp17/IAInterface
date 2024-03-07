@@ -101,6 +101,7 @@ async def main():
     stream = await get_stream(p, input_device_index, output_device_index)
     await broadcast(stream)
 
+
 if platform.system() == 'Windows':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
