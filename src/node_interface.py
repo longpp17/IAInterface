@@ -4,7 +4,7 @@ import pyaudio
 import asyncio
 import socketio
 from aioconsole import ainput
-
+import platform
 # Initialize PyAudio and socket.io async client
 p = pyaudio.PyAudio()
 sio = socketio.AsyncClient(logger=True, engineio_logger=True)
@@ -101,6 +101,8 @@ async def main():
     stream = await get_stream(p, input_device_index, output_device_index)
     await broadcast(stream)
 
+if platform.system() == 'Windows':
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 if __name__ == '__main__':
     asyncio.run(main())
