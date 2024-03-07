@@ -17,7 +17,7 @@ CHUNK = 1024
 stream = None
 
 stream_microphone = True
-
+# TODO: Save bootstrap server URL in a config file
 async def get_device_index(p: pyaudio.PyAudio):
     devices = p.get_device_count()
     input_devices, output_devices = {}, {}
