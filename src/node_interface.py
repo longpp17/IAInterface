@@ -4,9 +4,8 @@ import pyaudio
 import asyncio
 import socketio
 from aioconsole import ainput
-import threading
 import os
-
+from threading import Thread
 # Initialize PyAudio and socket.io async client
 p = pyaudio.PyAudio()
 sio = socketio.AsyncClient()
@@ -31,17 +30,15 @@ def start_asyncio_loop(loop):
     loop.run_forever()
 
 
-def create_thread(target, args):
-    thread = threading.Thread(target=target, args=args)
-    thread.start()
-    return thread
+
 
 
 # Function to schedule coroutines to run in the asyncio event loop thread
 def run_coroutine_threadsafe(coro):
     new_loop = asyncio.new_event_loop()
-    asyncio.run_coroutine_threadsafe(coro, new_loop)
-    return new_loop
+    t = Thread(target=start_asyncio_loop, args=(new_loop,))
+    t.start()  # Start the new thread, which starts the event loop
+    return asyncio.run_coroutine_threadsafe(coro, new_loop)
 
 
 async def get_device_index(p: pyaudio.PyAudio):
@@ -138,7 +135,12 @@ async def parse_user_input(user_input, p: pyaudio.PyAudio, sio: socketio.AsyncCl
         global INPUT_DEVICE_INDEX, OUTPUT_DEVICE_INDEX
         if commands[1] == "input":
             INPUT_DEVICE_INDEX = int(commands[2])
-            print("Input device switched to: ", INPUT_DEVICE_INDEX)
+            if INPUT_DEVICE_INDEX == -1:
+                global stream_microphone
+                stream_microphone = False
+                print("Input device switched to: ", "Default")
+            else:
+                print("Input device switched to: ", INPUT_DEVICE_INDEX)
         elif commands[1] == "output":
             OUTPUT_DEVICE_INDEX = int(commands[2])
             print("Output device switched to: ", OUTPUT_DEVICE_INDEX)
@@ -161,12 +163,15 @@ async def parse_user_input(user_input, p: pyaudio.PyAudio, sio: socketio.AsyncCl
                 print("Please select output device first")
                 return
 
-            stream = await get_stream(pyaudio, INPUT_DEVICE_INDEX, OUTPUT_DEVICE_INDEX)
+            stream = await get_stream(p, INPUT_DEVICE_INDEX, OUTPUT_DEVICE_INDEX)
+            print("Stream started")
+            # await broadcast(stream)
             global broadcast_loop
             broadcast_loop = run_coroutine_threadsafe(broadcast(stream))
 
         elif commands[1] == "off":
             # guard insure stream and broadcast_loop are not None
+            print("Stopping stream")
             if stream is None:
                 print("Stream is already off")
                 return
@@ -176,7 +181,7 @@ async def parse_user_input(user_input, p: pyaudio.PyAudio, sio: socketio.AsyncCl
             stream.stop_stream()
             stream.close()
             stream = None
-            broadcast_loop.close()
+            broadcast_loop.done()
 
         elif commands[1] == "to":
             peer_id = commands[2]
