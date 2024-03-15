@@ -4,10 +4,12 @@ import pyaudio
 import asyncio
 import socketio
 from aioconsole import ainput
+import threading
+import os
 
 # Initialize PyAudio and socket.io async client
 p = pyaudio.PyAudio()
-sio = socketio.AsyncClient(logger=True, engineio_logger=True)
+sio = socketio.AsyncClient()
 
 # Constants for audio stream configuration
 FORMAT = pyaudio.paInt16
@@ -18,6 +20,30 @@ stream = None
 
 stream_microphone = True
 # TODO: Save bootstrap server URL in a config file
+broadcast_loop = None
+INPUT_DEVICE_INDEX = None
+OUTPUT_DEVICE_INDEX = None
+
+
+# Function to run the asyncio event loop in a separate thread
+def start_asyncio_loop(loop):
+    asyncio.set_event_loop(loop)
+    loop.run_forever()
+
+
+def create_thread(target, args):
+    thread = threading.Thread(target=target, args=args)
+    thread.start()
+    return thread
+
+
+# Function to schedule coroutines to run in the asyncio event loop thread
+def run_coroutine_threadsafe(coro):
+    new_loop = asyncio.new_event_loop()
+    asyncio.run_coroutine_threadsafe(coro, new_loop)
+    return new_loop
+
+
 async def get_device_index(p: pyaudio.PyAudio):
     devices = p.get_device_count()
     input_devices, output_devices = {}, {}
@@ -52,11 +78,17 @@ async def get_stream(p: pyaudio.PyAudio, input_device_index: int, output_device_
 
 
 async def broadcast(local_stream: pyaudio.Stream):
-    if stream_microphone:
-        while True:
-            data = local_stream.read(CHUNK, exception_on_overflow=False)
-            await sio.emit('audio-buffer', data)
-            await asyncio.sleep(0)
+    # if stream_microphone:
+    while True:
+        data = local_stream.read(CHUNK, exception_on_overflow=False)
+
+        await sio.emit('audio-buffer', data)
+        await asyncio.sleep(0)
+
+
+@sio.on("get-peers")
+async def on_get_peers(data: str):
+    print("Received list of peers: ", data)
 
 
 @sio.on('audio-buffer')
@@ -66,25 +98,107 @@ async def on_audio(data):
         stream.write(data)
 
 
-async def main():
-    input_devices, output_devices = await get_device_index(p)
+async def parse_user_input(user_input, p: pyaudio.PyAudio, sio: socketio.AsyncClient):
+    commands = user_input.split(" ")
 
-    print("Available input devices: ")
-    print(input_devices)
-    input_device_index = int(await ainput("Enter the index of the device you want to use, type -1 to listen only: "))
-    if input_device_index == -1:
-        global stream_microphone
-        stream_microphone = False
-        input_device_index = 0
+    if commands[0] == "help":
+        print("Available commands: ")
+        print("help: display this help message")
+        print("exit: exit the program")
+        print("display input/output/all-devices: display the available input and output devices")
+        print("display peers: display the list of peers")
+        print("switch input/output <index>: switch the input and output devices")
+        print("switch i <index> o <index>: switch the input and output devices")
+        print("stream on/off: turn on/off the audio stream")
+        print("stream to <peer_id>: stream audio to a peer")
+
+    elif commands[0] == "exit":
+        print("Exiting the program...")
+        exit(0)
+
+    elif commands[0] == "display":
+        input_devices, output_devices = await get_device_index(p)
+        if commands[1] == "input":
+            print("Available input devices: ")
+            print(input_devices)
+        elif commands[1] == "output":
+            print("Available output devices: ")
+            print(output_devices)
+        elif commands[1] == "all-devices":
+            print("Available input devices: ")
+            print(input_devices)
+            print("Available output devices: ")
+            print(output_devices)
+        elif commands[1] == "peers":
+            await sio.emit("get-peers")
+        else:
+            print("Invalid command")
+
+    elif commands[0] == "switch":
+        global INPUT_DEVICE_INDEX, OUTPUT_DEVICE_INDEX
+        if commands[1] == "input":
+            INPUT_DEVICE_INDEX = int(commands[2])
+            print("Input device switched to: ", INPUT_DEVICE_INDEX)
+        elif commands[1] == "output":
+            OUTPUT_DEVICE_INDEX = int(commands[2])
+            print("Output device switched to: ", OUTPUT_DEVICE_INDEX)
+        elif commands[1] == "i" and commands[3] == "o":
+            INPUT_DEVICE_INDEX = int(commands[2])
+            OUTPUT_DEVICE_INDEX = int(commands[4])
+            print("Input device switched to: ", INPUT_DEVICE_INDEX)
+            print("Output device switched to: ", OUTPUT_DEVICE_INDEX)
+        else:
+            print("Invalid command")
+
+    elif commands[0] == "stream":
+        if commands[1] == "on":
+            global stream
+            if INPUT_DEVICE_INDEX is None:
+                print("Please select input device first")
+                return
+
+            if OUTPUT_DEVICE_INDEX is None:
+                print("Please select output device first")
+                return
+
+            stream = await get_stream(pyaudio, INPUT_DEVICE_INDEX, OUTPUT_DEVICE_INDEX)
+            global broadcast_loop
+            broadcast_loop = run_coroutine_threadsafe(broadcast(stream))
+
+        elif commands[1] == "off":
+            # guard insure stream and broadcast_loop are not None
+            if stream is None:
+                print("Stream is already off")
+                return
+            if broadcast_loop is None:
+                print ("Broadcast loop is already off")
+
+            stream.stop_stream()
+            stream.close()
+            stream = None
+            broadcast_loop.close()
+
+        elif commands[1] == "to":
+            peer_id = commands[2]
+            if peer_id is not None:
+                await sio.emit('stream-to-peer', peer_id)
+            else:
+                print("Invalid command")
+
+        else:
+            print("Invalid command")
+
+    else:
+        print("Invalid command")
 
 
-    print("Available output devices: ")
-    print(output_devices)
-    output_device_index = int(await ainput("Enter the index of the device you want to use: "))
+async def handle_user_input(p: pyaudio.PyAudio, sio: socketio.AsyncClient):
+    while True:
+        user_input = await ainput("enter help for help:")
+        await parse_user_input(user_input, p, sio)
 
-    await sio.connect('http://localhost:3000')
-    print('Connected to the server with SID:', sio.sid)
 
+async def create_bootstrap_links():
     print("Entering Bootstrap Link, Input 'done' to complete")
     links = []
     while True:
@@ -94,15 +208,32 @@ async def main():
         else:
             links.append(link)
     await sio.emit('setup-bootstrap', links)
+
+    with open("./bootstrap.txt", 'w') as f:
+        for link in links:
+            f.write(link + "\n")
+
     print("setup-bootstrap event emitted with data:", links)
 
 
-    global stream
-    stream = await get_stream(p, input_device_index, output_device_index)
-    await broadcast(stream)
+async def setup_bootstrap_links(bootstrap_file="./bootstrap.txt"):
+    if os.path.exists(bootstrap_file):
+        with open(bootstrap_file, 'r') as f:
+            links = f.readlines()
+        await sio.emit('setup-bootstrap', links)
+        print("setup-bootstrap event emitted with data:", links)
+    else:
+        print("No bootstrap file found")
+        await create_bootstrap_links()
+
+
+async def main():
+    await sio.connect('http://localhost:3000')
+    print('Connected to the server with SID:', sio.sid)
+
+    await setup_bootstrap_links()
+    await handle_user_input(p, sio)
 
 
 if __name__ == '__main__':
     asyncio.run(main())
-
-
